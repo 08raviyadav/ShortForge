@@ -37,7 +37,11 @@ python assets\gen_samples.py
 .\build\Release\shortforge.exe render assets\sample_project.json -o short.mp4
 ```
 
-## NVENC on your GTX 1650
+## NVENC (NVIDIA GPUs only — skip this if you have AMD)
+
+> **AMD users (e.g. Radeon RX 560X):** NVENC is NVIDIA-only, so it never
+> applies to your card — skip this whole section. The default vcpkg build
+> uses libx264 on the CPU, which is the right path for you.
 
 If your FFmpeg build includes `h264_nvenc` (the vcpkg build does **not**
 by default — it needs the NVIDIA codec headers), ShortForge picks it
