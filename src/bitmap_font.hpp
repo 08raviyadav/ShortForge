@@ -68,6 +68,7 @@ inline const uint8_t* font_glyph(char c) {
 
 // Width in pixels of text at the given integer scale (>= 1).
 inline int text_width(const std::string& s, int scale) {
+    if (s.empty()) return 0;
     if (scale < 1) scale = 1;
     return static_cast<int>(s.size()) * 6 * scale - scale;
 }

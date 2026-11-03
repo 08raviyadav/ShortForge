@@ -1,4 +1,5 @@
 // shortforge CLI: render | plan | probe
+#include <clocale>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -58,16 +59,26 @@ int cmd_plan(const std::string& path) {
 
 int cmd_render(const std::vector<std::string>& args) {
     std::string json, out, encoder;
+    bool end_opts = false;
     for (size_t i = 0; i < args.size(); ++i) {
-        if ((args[i] == "-o" || args[i] == "--output") && i + 1 < args.size()) {
+        const std::string& a = args[i];
+        if (!end_opts && a == "--") {
+            end_opts = true;
+        } else if (!end_opts && (a == "-o" || a == "--output") && i + 1 < args.size()) {
             out = args[++i];
-        } else if (args[i] == "--encoder" && i + 1 < args.size()) {
+        } else if (!end_opts && a == "--encoder" && i + 1 < args.size()) {
             encoder = args[++i];
-        } else if (!args[i].empty() && args[i][0] != '-') {
-            json = args[i];
-        } else {
+        } else if (!end_opts && !a.empty() && a[0] == '-') {
+            std::fprintf(stderr, "Error: unknown option '%s'\n", a.c_str());
             usage();
             return 1;
+        } else {
+            if (!json.empty()) {
+                std::fprintf(stderr, "Error: multiple input files ('%s' and '%s')\n",
+                             json.c_str(), a.c_str());
+                return 1;
+            }
+            json = a;  // after --, even "-weird.json" is accepted
         }
     }
     if (json.empty()) {
@@ -85,6 +96,9 @@ int cmd_render(const std::vector<std::string>& args) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Pin numeric locale: the JSON parser must see '.' as the decimal point
+    // even if the process inherits a comma-decimal locale.
+    std::setlocale(LC_NUMERIC, "C");
     if (argc < 2) {
         usage();
         return 1;
@@ -93,7 +107,9 @@ int main(int argc, char** argv) {
     try {
         if (cmd == "probe") return cmd_probe();
         if (cmd == "plan") {
-            if (argc < 3) {
+            if (argc != 3) {
+                if (argc > 3)
+                    std::fprintf(stderr, "Error: plan takes exactly one project file\n");
                 usage();
                 return 1;
             }

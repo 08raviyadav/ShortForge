@@ -70,7 +70,11 @@ Project load_project(const std::string& path) {
         throw JsonError("width and height must be even (H.264 requirement)");
 
     p.audio = resolve(root.get_str("audio"));
-    p.output = root.get_str("output", "short.mp4");
+    // Like asset paths, the project file's own "output" is relative to the
+    // project file; an absent key keeps the historical cwd-relative default.
+    // An explicit -o/--output on the command line is always cwd-relative.
+    const std::string out = root.get_str("output", "");
+    p.output = out.empty() ? "short.mp4" : resolve(out);
 
     const JsonValue& scenes = root.at("scenes");
     for (const auto& sv : scenes.as_arr()) {

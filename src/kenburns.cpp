@@ -13,18 +13,20 @@ double kb_ease(double t) {
 CropRect kenburns_crop(double t, double base_w, double base_h, double out_w, double out_h,
                        double z0, double z1, double px0, double py0, double px1, double py1) {
     const double e = kb_ease(t);
-    const double z = z0 + (z1 - z0) * e;
-    const double zs = std::max(1.0, z);
+    const double z = std::max(1.0, z0 + (z1 - z0) * e);
 
-    // Aspect-correct crop: fit the limiting dimension, keep output aspect.
-    double cw = base_w / zs;
-    double ch = cw * out_h / out_w;
-    if (ch > base_h) {
-        ch = base_h / zs;
-        cw = ch * out_w / out_h;
+    // Largest aspect-correct rectangle inscribed in the base image at zoom 1,
+    // then divided by the zoom factor. Comparing the *unzoomed* rectangle
+    // against the base keeps the crop continuous in z — comparing the zoomed
+    // size instead causes a visible jump cut mid-scene on wide/square images.
+    double fw = base_w;
+    double fh = fw * out_h / out_w;
+    if (fh > base_h) {
+        fh = base_h;
+        fw = fh * out_w / out_h;
     }
-    cw = std::min(cw, base_w);
-    ch = std::min(ch, base_h);
+    const double cw = fw / z;
+    const double ch = fh / z;
 
     const double px = px0 + (px1 - px0) * e;
     const double py = py0 + (py1 - py0) * e;

@@ -92,11 +92,33 @@ struct Parser {
         } else if (cp < 0x800) {
             out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
             out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else {
+        } else if (cp < 0x10000) {
             out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
             out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
             out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
         }
+    }
+
+    unsigned parse_hex4() {
+        unsigned cp = 0;
+        for (int k = 0; k < 4; ++k) {
+            char h = get();
+            cp <<= 4;
+            if (h >= '0' && h <= '9')
+                cp |= static_cast<unsigned>(h - '0');
+            else if (h >= 'a' && h <= 'f')
+                cp |= static_cast<unsigned>(h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F')
+                cp |= static_cast<unsigned>(h - 'A' + 10);
+            else
+                fail("bad \\u escape");
+        }
+        return cp;
     }
 
     std::string parse_string() {
@@ -105,6 +127,8 @@ struct Parser {
         while (true) {
             char c = get();
             if (c == '"') break;
+            if (static_cast<unsigned char>(c) < 0x20)
+                fail("unescaped control character in string");
             if (c == '\\') {
                 char e = get();
                 switch (e) {
@@ -117,14 +141,17 @@ struct Parser {
                     case 'r': out.push_back('\r'); break;
                     case 't': out.push_back('\t'); break;
                     case 'u': {
-                        unsigned cp = 0;
-                        for (int k = 0; k < 4; ++k) {
-                            char h = get();
-                            cp <<= 4;
-                            if (h >= '0' && h <= '9') cp |= static_cast<unsigned>(h - '0');
-                            else if (h >= 'a' && h <= 'f') cp |= static_cast<unsigned>(h - 'a' + 10);
-                            else if (h >= 'A' && h <= 'F') cp |= static_cast<unsigned>(h - 'A' + 10);
-                            else fail("bad \\u escape");
+                        unsigned cp = parse_hex4();
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            // High surrogate: must be followed by \uDC00-\uDFFF.
+                            if (get() != '\\' || get() != 'u')
+                                fail("expected low surrogate");
+                            const unsigned lo = parse_hex4();
+                            if (lo < 0xDC00 || lo > 0xDFFF)
+                                fail("invalid low surrogate");
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            fail("lone low surrogate");
                         }
                         append_utf8(out, cp);
                         break;
@@ -138,22 +165,35 @@ struct Parser {
         return out;
     }
 
+    // Strict JSON number grammar (RFC 8259): -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+    // Rejects "01", "1.", "+1", ".5". std::strtod itself is locale-dependent,
+    // so main() pins LC_NUMERIC to "C" as well.
     double parse_number() {
         size_t start = i;
         if (peek() == '-') get();
-        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+        if (i < s.size() && s[i] == '0') {
+            i++;
+        } else if (i < s.size() && s[i] >= '1' && s[i] <= '9') {
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
+        } else {
+            fail("bad number");
+        }
         if (i < s.size() && s[i] == '.') {
             i++;
+            if (!(i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))))
+                fail("bad number");
             while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
         }
         if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
             i++;
             if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+            if (!(i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))))
+                fail("bad number");
             while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) i++;
         }
-        std::string tok = s.substr(start, i - start);
+        const std::string tok = s.substr(start, i - start);
         char* end = nullptr;
-        double v = std::strtod(tok.c_str(), &end);
+        const double v = std::strtod(tok.c_str(), &end);
         if (end != tok.c_str() + tok.size()) fail("bad number");
         return v;
     }

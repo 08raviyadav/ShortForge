@@ -25,6 +25,9 @@ extern "C" {
 namespace sf {
 namespace {
 
+// RAII wrappers own their FFmpeg objects outright: copies are deleted and
+// moves null out the source, so returning them by value can never double-free.
+
 struct FmtOut {
     AVFormatContext* c = nullptr;
     ~FmtOut() {
@@ -33,11 +36,38 @@ struct FmtOut {
             avformat_free_context(c);
         }
     }
+    FmtOut() = default;
+    FmtOut(const FmtOut&) = delete;
+    FmtOut& operator=(const FmtOut&) = delete;
+    FmtOut(FmtOut&& o) noexcept : c(o.c) { o.c = nullptr; }
+    FmtOut& operator=(FmtOut&& o) noexcept {
+        if (this != &o) {
+            if (c) {
+                if (!(c->oformat->flags & AVFMT_NOFILE)) avio_closep(&c->pb);
+                avformat_free_context(c);
+            }
+            c = o.c;
+            o.c = nullptr;
+        }
+        return *this;
+    }
 };
 struct CodecCtx {
     AVCodecContext* c = nullptr;
     ~CodecCtx() {
         avcodec_free_context(&c);
+    }
+    CodecCtx() = default;
+    CodecCtx(const CodecCtx&) = delete;
+    CodecCtx& operator=(const CodecCtx&) = delete;
+    CodecCtx(CodecCtx&& o) noexcept : c(o.c) { o.c = nullptr; }
+    CodecCtx& operator=(CodecCtx&& o) noexcept {
+        if (this != &o) {
+            avcodec_free_context(&c);
+            c = o.c;
+            o.c = nullptr;
+        }
+        return *this;
     }
 };
 struct SwsPtr {
@@ -45,11 +75,35 @@ struct SwsPtr {
     ~SwsPtr() {
         sws_freeContext(c);
     }
+    SwsPtr() = default;
+    SwsPtr(const SwsPtr&) = delete;
+    SwsPtr& operator=(const SwsPtr&) = delete;
+    SwsPtr(SwsPtr&& o) noexcept : c(o.c) { o.c = nullptr; }
+    SwsPtr& operator=(SwsPtr&& o) noexcept {
+        if (this != &o) {
+            sws_freeContext(c);
+            c = o.c;
+            o.c = nullptr;
+        }
+        return *this;
+    }
 };
 struct SwrPtr {
     SwrContext* c = nullptr;
     ~SwrPtr() {
         swr_free(&c);
+    }
+    SwrPtr() = default;
+    SwrPtr(const SwrPtr&) = delete;
+    SwrPtr& operator=(const SwrPtr&) = delete;
+    SwrPtr(SwrPtr&& o) noexcept : c(o.c) { o.c = nullptr; }
+    SwrPtr& operator=(SwrPtr&& o) noexcept {
+        if (this != &o) {
+            swr_free(&c);
+            c = o.c;
+            o.c = nullptr;
+        }
+        return *this;
     }
 };
 struct FramePtr {
@@ -60,11 +114,34 @@ struct FramePtr {
     ~FramePtr() {
         av_frame_free(&f);
     }
+    FramePtr(const FramePtr&) = delete;
+    FramePtr& operator=(const FramePtr&) = delete;
+    FramePtr(FramePtr&& o) noexcept : f(o.f) { o.f = nullptr; }
+    FramePtr& operator=(FramePtr&& o) noexcept {
+        if (this != &o) {
+            av_frame_free(&f);
+            f = o.f;
+            o.f = nullptr;
+        }
+        return *this;
+    }
 };
 struct PacketPtr {
-    AVPacket* p = av_packet_alloc();
+    AVPacket* p = nullptr;
+    PacketPtr() : p(av_packet_alloc()) {}
     ~PacketPtr() {
         av_packet_free(&p);
+    }
+    PacketPtr(const PacketPtr&) = delete;
+    PacketPtr& operator=(const PacketPtr&) = delete;
+    PacketPtr(PacketPtr&& o) noexcept : p(o.p) { o.p = nullptr; }
+    PacketPtr& operator=(PacketPtr&& o) noexcept {
+        if (this != &o) {
+            av_packet_free(&p);
+            p = o.p;
+            o.p = nullptr;
+        }
+        return *this;
     }
     void reset() { av_packet_unref(p); }
 };
@@ -85,9 +162,15 @@ void encode_packet(AVCodecContext* cc, AVFrame* frame, AVStream* st, AVFormatCon
     }
 }
 
-// Cover-scale an image so it fills W x H (like CSS object-fit: cover).
-Image cover_scale(const Image& src, int W, int H) {
-    const double s = std::max(W / static_cast<double>(src.w), H / static_cast<double>(src.h));
+// Cover-scale an image so it fills W x H (like CSS object-fit: cover),
+// keeping up to (W*max_zoom) x (H*max_zoom) native detail so Ken Burns
+// zoom-ins never upscale from a downscaled buffer. Never upscales past the
+// native source resolution.
+Image cover_scale(const Image& src, int W, int H, double max_zoom) {
+    const double s_cover = std::max(W / static_cast<double>(src.w), H / static_cast<double>(src.h));
+    const double s_need =
+        std::max(W * max_zoom / src.w, H * max_zoom / src.h);
+    const double s = std::max(s_cover, std::min(s_need, 1.0));
     const int bw = std::max(W, static_cast<int>(std::ceil(src.w * s)));
     const int bh = std::max(H, static_cast<int>(std::ceil(src.h * s)));
     SwsPtr sws;
@@ -128,8 +211,11 @@ void draw_caption(uint8_t* rgb, int W, int H, const std::string& title,
 }
 
 // Try encoders in order until one opens successfully.
+// global_header must be decided BEFORE avcodec_open2: H.264 encoders read
+// AV_CODEC_FLAG_GLOBAL_HEADER at open time to decide whether SPS/PPS goes
+// into extradata (avcC box) or repeats in-band.
 CodecCtx open_video_encoder(const std::string& override_name, const Project& p,
-                            std::string& used_name) {
+                            std::string& used_name, bool global_header) {
     std::vector<std::string> tries;
     if (!override_name.empty()) {
         // Explicit choice: try only it, fail loudly if it can't be used.
@@ -160,6 +246,7 @@ CodecCtx open_video_encoder(const std::string& override_name, const Project& p,
         cc.c->bit_rate = 8000000;
         cc.c->gop_size = p.fps * 2;
         cc.c->max_b_frames = 2;
+        if (global_header) cc.c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
         if (name == "libx264") av_opt_set(cc.c->priv_data, "preset", "veryfast", 0);
         if (avcodec_open2(cc.c, enc, nullptr) == 0) {
             used_name = name;
@@ -180,19 +267,21 @@ RenderStats render_project(const Project& p, const std::string& out_path,
                            const std::string& encoder_override) {
     const int W = p.width, H = p.height, fps = p.fps;
 
-    // 1. Decode + cover-scale every scene image.
-    std::vector<Image> bases;
+    // 1. Validate every scene image up front (fail fast, before the muxer
+    // starts), then decode lazily per scene inside the render loop so peak
+    // RAM stays at one scene instead of the whole project.
     std::vector<int> scene_frames;
     int total_frames = 0;
     for (const auto& sc : p.scenes) {
-        Image img = decode_image(sc.image);
-        bases.push_back(cover_scale(img, W, H));
+        Image probe = decode_image(sc.image);  // throws on unreadable input
+        if (probe.empty()) throw std::runtime_error("empty image: " + sc.image);
         const int n = std::max(1, static_cast<int>(std::lround(sc.duration * fps)));
         scene_frames.push_back(n);
         total_frames += n;
     }
-    std::fprintf(stderr, "Decoded %zu scenes -> %d frames @ %dfps\n", bases.size(), total_frames,
-                 fps);
+    std::vector<Image> bases(p.scenes.size());
+    std::fprintf(stderr, "Validated %zu scenes -> %d frames @ %dfps\n", p.scenes.size(),
+                 total_frames, fps);
 
     // 2. Audio (optional; warn and continue without it on failure).
     AudioClip audio;
@@ -212,11 +301,11 @@ RenderStats render_project(const Project& p, const std::string& out_path,
         throw std::runtime_error("cannot create mp4 muxer");
 
     std::string enc_name;
-    CodecCtx vcc = open_video_encoder(encoder_override, p, enc_name);
+    const bool global_header = (oc.c->oformat->flags & AVFMT_GLOBALHEADER) != 0;
+    CodecCtx vcc = open_video_encoder(encoder_override, p, enc_name, global_header);
     AVStream* vst = avformat_new_stream(oc.c, nullptr);
     if (!vst) throw std::runtime_error("cannot create video stream");
     vst->time_base = vcc.c->time_base;
-    if (oc.c->oformat->flags & AVFMT_GLOBALHEADER) vcc.c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     if (avcodec_parameters_from_context(vst->codecpar, vcc.c) < 0)
         throw std::runtime_error("video stream params failed");
 
@@ -282,8 +371,7 @@ RenderStats render_project(const Project& p, const std::string& out_path,
 
     FramePtr aframe(false);
     const int a_frame_size = (has_audio && acc.c->frame_size > 0) ? acc.c->frame_size : 1024;
-    std::vector<int16_t> a_s16;
-    std::vector<uint8_t> a_conv;
+    std::vector<int16_t> a_s16;  // resampler input scratch (s16 stereo)
     if (has_audio) {
         aframe.f = av_frame_alloc();
         aframe.f->format = aac_fmt;
@@ -293,10 +381,6 @@ RenderStats render_project(const Project& p, const std::string& out_path,
         if (av_frame_get_buffer(aframe.f, 0) < 0)
             throw std::runtime_error("audio frame alloc failed");
         a_s16.resize(static_cast<size_t>(a_frame_size) * 2);
-        // Per-plane byte size (AAC is planar FLTP: 2 planes for stereo).
-        const int plane_bytes =
-            av_samples_get_buffer_size(nullptr, 1, a_frame_size, aac_fmt, 0);
-        a_conv.resize(plane_bytes > 0 ? static_cast<size_t>(plane_bytes) * 2 : 0);
     }
 
     // 5. Interleaved encode loop.
@@ -319,8 +403,10 @@ RenderStats render_project(const Project& p, const std::string& out_path,
         const double vt = v_next / static_cast<double>(fps);
         const double at = a_next / 44100.0;
         if (has_audio && a_next < need_audio && at <= vt) {
-            // --- audio frame ---
-            for (int i = 0; i < a_frame_size; ++i) {
+            // --- audio frame: never encode past what the video needs ---
+            const int take =
+                static_cast<int>(std::min<int64_t>(a_frame_size, need_audio - a_next));
+            for (int i = 0; i < take; ++i) {
                 const int64_t s = a_next + i;
                 int16_t l = 0, r = 0;
                 if (s * 2 + 1 < static_cast<int64_t>(audio.pcm.size())) {
@@ -330,23 +416,18 @@ RenderStats render_project(const Project& p, const std::string& out_path,
                 a_s16[static_cast<size_t>(i) * 2] = l;
                 a_s16[static_cast<size_t>(i) * 2 + 1] = r;
             }
-            const uint8_t* in[1] = {reinterpret_cast<const uint8_t*>(a_s16.data())};
-            uint8_t* outp[2] = {a_conv.data(),
-                                a_conv.data() + a_conv.size() / 2};
-            if (swr_convert(aswr.c, outp, a_frame_size, in, a_frame_size) < 0)
-                throw std::runtime_error("audio resample failed");
             if (av_frame_make_writable(aframe.f) < 0)
                 throw std::runtime_error("audio frame not writable");
-            const size_t half = a_conv.size() / 2;
-            if (av_sample_fmt_is_planar(aac_fmt)) {
-                std::copy(a_conv.begin(), a_conv.begin() + half, aframe.f->data[0]);
-                std::copy(a_conv.begin() + half, a_conv.end(), aframe.f->data[1]);
-            } else {
-                std::copy(a_conv.begin(), a_conv.end(), aframe.f->data[0]);
-            }
+            const uint8_t* in[1] = {reinterpret_cast<const uint8_t*>(a_s16.data())};
+            // Convert straight into the frame's planes: no temp buffer, no
+            // alignment guessing. nb_samples follows the actual output count.
+            const int got =
+                swr_convert(aswr.c, aframe.f->extended_data, a_frame_size, in, take);
+            if (got < 0) throw std::runtime_error("audio resample failed");
+            aframe.f->nb_samples = got;
             aframe.f->pts = a_next;
             encode_packet(acc.c, aframe.f, ast, oc.c);
-            a_next += a_frame_size;
+            a_next += got;
         } else {
             // --- video frame ---
             while (scene_idx + 1 < static_cast<int>(scene_frames.size()) &&
@@ -355,6 +436,12 @@ RenderStats render_project(const Project& p, const std::string& out_path,
                 ++scene_idx;
             }
             const Scene& sc = p.scenes[scene_idx];
+            if (bases[scene_idx].empty()) {
+                // Lazy per-scene decode: peak RAM stays at one scene.
+                Image img = decode_image(sc.image);
+                const double zmax = std::max(sc.zoom_from, sc.zoom_to);
+                bases[scene_idx] = cover_scale(img, W, H, zmax);
+            }
             const Image& base = bases[scene_idx];
             const int n = scene_frames[scene_idx];
             const int local = v_next - scene_start;
@@ -387,8 +474,27 @@ RenderStats render_project(const Project& p, const std::string& out_path,
             sws_scale(yuv_sws.c, dp, dstr, 0, H, yuv.f->data, yuv.f->linesize);
             yuv.f->pts = v_next;
             encode_packet(vcc.c, yuv.f, vst, oc.c);
+            if (local == n - 1) bases[scene_idx] = Image{};  // release scene pixels
             ++v_next;
             progress();
+        }
+    }
+
+    // Drain resampler delay so the audio tail isn't cut off (capped at the
+    // video duration).
+    if (has_audio) {
+        while (a_next < need_audio) {
+            if (av_frame_make_writable(aframe.f) < 0)
+                throw std::runtime_error("audio frame not writable");
+            const int max_out =
+                static_cast<int>(std::min<int64_t>(a_frame_size, need_audio - a_next));
+            const int got =
+                swr_convert(aswr.c, aframe.f->extended_data, max_out, nullptr, 0);
+            if (got <= 0) break;
+            aframe.f->nb_samples = got;
+            aframe.f->pts = a_next;
+            encode_packet(acc.c, aframe.f, ast, oc.c);
+            a_next += got;
         }
     }
 

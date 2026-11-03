@@ -41,7 +41,12 @@ Windows build: see [docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md).
 }
 ```
 
-Asset paths are resolved relative to the project file. Width/height must be even (H.264).
+Asset paths (`image`, `audio`) are resolved relative to the project file, and so
+is the project file's own `output` (an absent `output` defaults to `short.mp4`
+in the current directory). An explicit `-o/--output` on the command line is
+always relative to the current directory. In this example the project file
+sits next to the `assets/` folder, so `assets/scene1.bmp` resolves correctly —
+don't put the project file inside `assets/` *and* keep the `assets/` prefix. Width/height must be even (H.264).
 
 ## How it works
 
