@@ -1,0 +1,7 @@
+build/
+*.mp4
+*.o
+.DS_Store
+# Generated demo assets (recreate with: python3 assets/gen_samples.py)
+assets/*.bmp
+assets/*.wav
