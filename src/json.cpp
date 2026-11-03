@@ -245,6 +245,12 @@ struct Parser {
 
 JsonValue parse_json(const std::string& text) {
     Parser p(text);
+    // Skip a UTF-8 BOM, commonly added by Windows editors.
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB &&
+        static_cast<unsigned char>(text[2]) == 0xBF) {
+        p.i = 3;
+    }
     JsonValue v = p.parse_value();
     skip_ws(text, p.i);
     if (p.i != text.size()) throw JsonError("trailing characters after JSON value");

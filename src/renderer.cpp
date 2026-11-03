@@ -131,15 +131,25 @@ void draw_caption(uint8_t* rgb, int W, int H, const std::string& title,
 CodecCtx open_video_encoder(const std::string& override_name, const Project& p,
                             std::string& used_name) {
     std::vector<std::string> tries;
-    if (!override_name.empty()) tries.push_back(override_name);
-    for (const char* n : {"h264_nvenc", "libx264", "libopenh264", "mpeg4"})
-        if (std::find(tries.begin(), tries.end(), n) == tries.end()) tries.push_back(n);
+    if (!override_name.empty()) {
+        // Explicit choice: try only it, fail loudly if it can't be used.
+        tries.push_back(override_name);
+    } else {
+        // Auto-pick: fall through the preference list until one opens.
+        for (const char* n : {"h264_nvenc", "libx264", "libopenh264", "mpeg4"})
+            tries.emplace_back(n);
+    }
 
     CodecCtx cc;
     for (const auto& name : tries) {
         const AVCodec* enc = avcodec_find_encoder_by_name(name.c_str());
         if (!enc && name == "mpeg4") enc = avcodec_find_encoder(AV_CODEC_ID_MPEG4);
-        if (!enc) continue;
+        if (!enc) {
+            if (!override_name.empty())
+                throw std::runtime_error("encoder not available: " + name +
+                                         " (see `shortforge probe`)");
+            continue;
+        }
         cc.c = avcodec_alloc_context3(enc);
         if (!cc.c) throw std::runtime_error("codec context alloc failed");
         cc.c->width = p.width;
@@ -155,7 +165,11 @@ CodecCtx open_video_encoder(const std::string& override_name, const Project& p,
             used_name = name;
             return cc;
         }
-        avcodec_free_context(&cc.c);  // this build/machine can't use it; try next
+        avcodec_free_context(&cc.c);
+        if (!override_name.empty())
+            throw std::runtime_error("encoder '" + name +
+                                     "' is present but failed to open on this machine");
+        // Auto-pick: this build/machine can't use it; try next.
     }
     throw std::runtime_error("no usable video encoder (tried: h264_nvenc, libx264, mpeg4)");
 }

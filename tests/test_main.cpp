@@ -36,6 +36,10 @@ static void test_json() {
     auto e = sf::parse_json(R"({"s": "a\nb\u00e9"})");
     CHECK(e.at("s").as_str() == std::string("a\nb\xc3\xa9"));  // é as UTF-8
 
+    // UTF-8 BOM (Windows editors) is skipped.
+    auto bom = sf::parse_json(std::string("\xEF\xBB\xBF") + R"({"a": 1})");
+    CHECK(bom.at("a").as_num() == 1.0);
+
     for (const char* bad : {"{bad}", "[1, 2", "{\"a\":}", "", "tru"}) {
         bool threw = false;
         try {
